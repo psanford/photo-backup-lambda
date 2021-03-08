@@ -164,7 +164,8 @@ func (s *server) handleUploadRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s3Path := path.Join(s.pathPrefix, meta.ID)
+	ts := meta.Mtime.Format("2006-01-02-15_04_05.9")
+	s3Path := path.Join(s.pathPrefix, ts+"-"+meta.ID+"-"+meta.Name)
 
 	lgr = lgr.New(
 		"id", meta.ID,
