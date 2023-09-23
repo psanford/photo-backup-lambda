@@ -12,14 +12,16 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
 var (
-	url      = flag.String("url", "", "URL of upload_request handler")
-	username = flag.String("username", "", "Basic auth username")
-	password = flag.String("password", "", "Basic auth password")
-	file     = flag.String("file", "", "Path to file to upload")
+	url        = flag.String("url", "", "URL of upload_request handler")
+	username   = flag.String("username", "", "Basic auth username")
+	password   = flag.String("password", "", "Basic auth password")
+	pendingDir = flag.String("pending_dir", "", "Path to pending files")
+	doneDir    = flag.String("done_dir", "", "Path to move files to when upload completes")
 )
 
 func main() {
@@ -35,59 +37,98 @@ func run() error {
 		return fmt.Errorf("-url is required")
 	}
 
-	if *file == "" {
-		return fmt.Errorf("-file is required")
+	if *pendingDir == "" {
+		return fmt.Errorf("-pending_dir is required")
 	}
-	f, err := os.Open(*file)
+	files, err := os.ReadDir(*pendingDir)
 	if err != nil {
 		return err
 	}
 
-	summer := sha256.New()
-	_, err = io.Copy(summer, f)
+	err = os.MkdirAll(*doneDir, 0700)
 	if err != nil {
 		return err
 	}
 
-	id := hex.EncodeToString(summer.Sum(nil))
-	stat, err := f.Stat()
-	if err != nil {
-		return err
+	for i, finfo := range files {
+		err := func() error {
+			i := i
+			finfo := finfo
+			srcPath := filepath.Join(*pendingDir, finfo.Name())
+			f, err := os.Open(srcPath)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+
+			summer := sha256.New()
+			_, err = io.Copy(summer, f)
+			if err != nil {
+				return err
+			}
+
+			id := hex.EncodeToString(summer.Sum(nil))
+			stat, err := f.Stat()
+			if err != nil {
+				return err
+			}
+
+			size := stat.Size()
+			mtime := stat.ModTime()
+
+			name := filepath.Base(finfo.Name())
+
+			header := make([]byte, 512)
+			f.Seek(0, io.SeekStart)
+			io.ReadFull(f, header)
+
+			contentType := http.DetectContentType(header)
+
+			contentParts := strings.SplitN(contentType, "/", 2)
+			if contentParts[0] != "image" && contentParts[0] != "audio" && contentParts[0] != "video" {
+				log.Printf("%s not a media file, content-type: %s", finfo.Name(), contentType)
+				return nil
+			}
+
+			log.Printf("[%d/%d] upload: %s\n", i+1, len(files), name)
+
+			dest, err := requestUploadURL(id, name, contentType, mtime, size)
+			if err != nil {
+				return err
+			}
+
+			if dest.Status == StatusSkipUpload {
+				log.Printf("upload already exists, skipping. id=%s", id)
+
+				err = os.Rename(srcPath, filepath.Join(*doneDir, finfo.Name()))
+				if err != nil {
+					return err
+				}
+
+				return nil
+			}
+
+			f.Seek(0, io.SeekStart)
+			err = uploadFile(f, size, dest)
+			if err != nil {
+				return err
+			}
+
+			err = os.Rename(srcPath, filepath.Join(*doneDir, finfo.Name()))
+			if err != nil {
+				return err
+			}
+
+			log.Printf("Upload success!, id=%s", id)
+			return nil
+		}()
+
+		if err != nil {
+			return err
+		}
 	}
-
-	size := stat.Size()
-	mtime := stat.ModTime()
-
-	name := filepath.Base(*file)
-
-	header := make([]byte, 512)
-	f.Seek(0, io.SeekStart)
-	io.ReadFull(f, header)
-
-	contentType := http.DetectContentType(header)
-
-	dest, err := requestUploadURL(id, name, contentType, mtime, size)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("upload dest: %+v\n", dest)
-
-	if dest.Status == StatusSkipUpload {
-		log.Printf("upload already exists, skipping. id=%s", id)
-		return nil
-	}
-
-	f.Seek(0, io.SeekStart)
-	err = uploadFile(f, size, dest)
-	if err != nil {
-		return err
-	}
-
-	log.Printf("Upload success!, id=%s", id)
 
 	return nil
-
 }
 
 func uploadFile(r io.Reader, size int64, dest *UploadDestination) error {
