@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-lambda-go/lambda"
@@ -190,6 +192,34 @@ func (s *server) handleUploadRequest(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusConflict)
 		json.NewEncoder(w).Encode(resp)
 		return
+	}
+
+	s3PathAltPrefix := path.Join(s.pathPrefix, meta.Mtime.Format("2006-01-02-15_04_05"))
+
+	objects, err := s.s3.ListObjects(&s3.ListObjectsInput{
+		Bucket: &s.bucket,
+		Prefix: &s3PathAltPrefix,
+	})
+	if err != nil {
+		lgr.Error("list_objects_err", "err", err)
+	}
+	for _, obj := range objects.Contents {
+		lgr.Info("ls_existing", "obj", *obj.Key)
+		// parts year-month-day-hourminuteetc-id-name
+		_, fname := filepath.Split(*obj.Key)
+		parts := strings.SplitN(fname, "-", 6)
+		if len(parts) > 4 {
+			gotID := parts[4]
+			if gotID == meta.ID {
+				lgr.Error("filename_already_exists_different_s3_path", "new_path", s3Path, "old_path", *obj.Key)
+				resp := UploadDestination{
+					Status: StatusSkipUpload,
+				}
+				w.WriteHeader(http.StatusConflict)
+				json.NewEncoder(w).Encode(resp)
+				return
+			}
+		}
 	}
 
 	putObjInput := &s3.PutObjectInput{
