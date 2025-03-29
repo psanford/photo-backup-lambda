@@ -14,6 +14,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/dsoprea/go-exif/v3"
+	exifcommon "github.com/dsoprea/go-exif/v3/common"
 )
 
 var (
@@ -88,6 +91,16 @@ func run() error {
 			if contentParts[0] != "image" && contentParts[0] != "audio" && contentParts[0] != "video" {
 				log.Printf("%s not a media file, content-type: %s", finfo.Name(), contentType)
 				return nil
+			}
+
+			if contentParts[0] == "image" {
+				f.Seek(0, io.SeekStart)
+				exif, err := readExifInfo(f)
+				if err != nil {
+					log.Printf("read exif err: %s", err)
+				} else {
+					mtime = exif.Time
+				}
 			}
 
 			log.Printf("[%d/%d] upload: %s\n", i+1, len(files), name)
@@ -195,6 +208,53 @@ func requestUploadURL(id, name, contentType string, mtime time.Time, size int64)
 	}
 
 	return &dest, nil
+}
+
+type ExifInfo struct {
+	Time  time.Time `json:"time"`
+	Make  string    `json:"make"`
+	Model string    `json:"model"`
+}
+
+func readExifInfo(r io.Reader) (*ExifInfo, error) {
+	rawExif, err := exif.SearchAndExtractExifWithReader(r)
+	if err != nil {
+		return nil, fmt.Errorf("parse jpeg exif search err %w", err)
+	}
+
+	var meta ExifInfo
+	im, err := exifcommon.NewIfdMappingWithStandard()
+	if err != nil {
+		return nil, fmt.Errorf("parse jpeg ifd mapping err %w", err)
+	}
+
+	ti := exif.NewTagIndex()
+
+	_, index, err := exif.Collect(im, ti, rawExif)
+	if err != nil {
+		return nil, fmt.Errorf("parse jpeg collect err %w", err)
+	}
+
+	cb := func(ifd *exif.Ifd, entry *exif.IfdTagEntry) error {
+		tagName := entry.TagName()
+		value, _ := entry.Value()
+		switch tagName {
+		case "Make":
+			meta.Make = value.(string)
+		case "Model":
+			meta.Model = value.(string)
+		case "DateTime":
+			meta.Time, _ = time.Parse("2006:01:02 15:04:05", value.(string))
+		}
+		return nil
+	}
+
+	err = index.RootIfd.EnumerateTagsRecursively(cb)
+	if err != nil {
+		return nil, fmt.Errorf("enumeratetagsrecursively err %w", err)
+	}
+
+	return &meta, nil
 }
 
 type UploadDestination struct {
